@@ -189,6 +189,9 @@
                                 <button class="btn btn-success" onclick="setServoAngle()">
                                     <i class="fas fa-arrow-right me-2"></i>Set Angle
                                 </button>
+                                <button class="btn btn-warning ms-2" onclick="resetServo()">
+                                    <i class="fas fa-undo me-2"></i>Reset
+                                </button>
                                 <button class="btn btn-info ms-2" onclick="setServoPreset(0)">
                                     <i class="fas fa-angle-left me-2"></i>0°
                                 </button>
@@ -304,18 +307,23 @@
     </div>
 
     <script>
-        // Fetch sensor data
-        async function fetchData() {
-            try {
-                const res = await axios.get("/api/data");
-                document.getElementById("temperature").textContent = res.data.temperature + " °C";
-                document.getElementById("humidity").textContent = res.data.humidity + " %";
-                document.getElementById("light").textContent = res.data.light + " lux";
-                document.getElementById("moisture").textContent = res.data.moisture + " %";
-            } catch (error) {
-                console.error("Error fetching data:", error);
-            }
+        function fetchSensorData() {
+            axios.get('/api/data')
+                .then(response => {
+                    const data = response.data;
+                    document.getElementById('temperature').textContent = `${data.temperature} °C`;
+                    document.getElementById('humidity').textContent = `${data.humidity} %`;
+                    document.getElementById('light').textContent = `${data.light} lux`;
+                    document.getElementById('moisture').textContent = `${data.moisture} %`;
+                })
+                .catch(error => {
+                    console.error('Error fetching sensor data:', error);
+                });
         }
+
+        // Fetch data every 5 seconds
+        setInterval(fetchSensorData, 5000);
+        fetchSensorData();
 
         // Capture ESP32 image
         async function captureESP32Image() {
@@ -631,6 +639,11 @@
             setServoAngle(angle);
         }
         
+        // Reset servo to initial position (0 degrees)
+        function resetServo() {
+            setServoAngle(0);
+        }
+        
         // Update servo visual representation
         function updateServoVisual(angle) {
             const servoIcon = document.getElementById('servoIcon');
@@ -645,7 +658,7 @@
                 const response = await axios.get('/api/servo/status');
                 if (!response.data.mqtt_enabled) {
                     // Disable servo controls if MQTT is not available
-                    const servoControls = document.querySelectorAll('#servoAngleRange, button[onclick*="setServo"]');
+                    const servoControls = document.querySelectorAll('#servoAngleRange, button[onclick*="setServo"], button[onclick="resetServo()"]');
                     servoControls.forEach(control => {
                         control.disabled = true;
                         control.title = 'MQTT not available';

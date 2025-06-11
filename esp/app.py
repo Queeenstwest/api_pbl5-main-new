@@ -10,6 +10,8 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import requests.exceptions
 import json
+import cv2
+import numpy as np
 
 app = Flask(__name__)
 CORS(app)
@@ -49,8 +51,51 @@ def init_db():
         analysis TEXT
     )''')
 
+    # Create table for device status tracking
+    c.execute('''CREATE TABLE IF NOT EXISTS device_status (
+        timestamp TEXT,
+        device_type TEXT,
+        device_id TEXT,
+        status TEXT
+    )''')
+
     conn.commit()
     conn.close()
+
+
+def rotate_image_180(image_path):
+    """
+    Rotate an image 180 degrees and save it back to the same path
+
+    Args:
+        image_path (str): Path to the image file
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Read the image
+        img = cv2.imread(image_path)
+        if img is None:
+            print(f"Error: Could not read image from {image_path}")
+            return False
+
+        # Rotate 180 degrees (equivalent to flipping both vertically and horizontally)
+        # Flip both vertically and horizontally = 180° rotation
+        rotated_img = cv2.flip(img, -1)
+
+        # Save the rotated image back to the same path
+        success = cv2.imwrite(image_path, rotated_img)
+        if success:
+            print(f"Image rotated 180° and saved successfully: {image_path}")
+            return True
+        else:
+            print(f"Error: Failed to save rotated image to {image_path}")
+            return False
+
+    except Exception as e:
+        print(f"Error rotating image {image_path}: {str(e)}")
+        return False
 
 
 def process_image_with_ai(image_path):
@@ -119,6 +164,11 @@ def save_image_from_esp32():
             with open(image_path, 'wb') as f:
                 f.write(response.content)
 
+            # Rotate the image 180 degrees
+            rotate_success = rotate_image_180(image_path)
+            if not rotate_success:
+                print(f"Warning: Failed to rotate image {image_filename}")
+
             # Process with AI
             analysis_results = process_image_with_ai(image_path)
 
@@ -156,62 +206,90 @@ client = mqtt.Client()
 
 def on_connect(client, userdata, flags, rc):
     print("Connected to MQTT with code", rc)
-    client.subscribe("sensor/dht11")
-    client.subscribe("sensor/bh1750")
-    client.subscribe("sensor/soil")
+    # Subscribe to sensor topics with device IDs
+    client.subscribe("sensor/temp1")
+    client.subscribe("sensor/hum1")
+    client.subscribe("sensor/light1")
+    client.subscribe("sensor/soil1")
+    # Subscribe to device status topics
+    client.subscribe("device/fan1")
+    client.subscribe("device/pump1")
+    client.subscribe("device/cover1")
     client.subscribe("image/leaf")
+
+
+def publish_sensor_data(sensor_type, device_id, value):
+    try:
+        message = {
+            "type": sensor_type,
+            "device_id": device_id,
+            "value": value,
+            "time": datetime.now().isoformat()
+        }
+        client.publish(f"sensor/{device_id}", json.dumps(message))
+        print(f"Published {sensor_type} data: {message}")
+    except Exception as e:
+        print(f"Error publishing sensor data: {e}")
 
 
 def on_message(client, userdata, msg):
     global latest_data
-    if msg.topic == "sensor/dht11":
-        data = msg.payload.decode()
-        try:
-            temp = float(data.split("temp:")[1].split("C")[0])
-            hum = float(data.split("humidity:")[1].split("%")[0])
-            latest_data["temperature"] = temp
-            latest_data["humidity"] = hum
-            print(
-                f"Received DHT11 data: Temperature={temp}°C, Humidity={hum}%")
-        except Exception as e:
-            print(f"Error parsing DHT11 data: {data}, Error: {e}")
-    elif msg.topic == "sensor/bh1750":
-        data = msg.payload.decode()
-        try:
-            # Handle both formats: "light:100lux" and "light:100,lux"
-            if "," in data:
-                light = float(data.split("light:")[1].split(",")[0])
-            else:
-                light = float(data.split("light:")[1].split("lux")[0])
-            latest_data["light"] = light
-            print(f"Received light data: {light} lux")
-        except Exception as e:
-            print(f"Error parsing BH1750 data: {data}, Error: {e}")
-    elif msg.topic == "sensor/soil":
-        data = msg.payload.decode()
-        try:
-            # Parse moisture from "moisture:1%,raw:26256,voltage:3.28V"
-            moisture = int(data.split("moisture:")[1].split("%")[0])
-            latest_data["moisture"] = moisture
-            print(f"Received soil moisture data: {moisture}%")
-        except Exception as e:
-            print(f"Error parsing soil moisture data: {data}, Error: {e}")
-    elif msg.topic == "image/leaf":
-        image = msg.payload.decode()
-        conn = sqlite3.connect("database.db")
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO leaf_images (timestamp, image) VALUES (datetime('now'), ?)", (image,))
-        conn.commit()
-        conn.close()
+    try:
+        data = json.loads(msg.payload.decode())
+        topic = msg.topic
 
-    # Lưu tất cả dữ liệu vào SQLite
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO sensor_data (timestamp, temperature, humidity, light, moisture) VALUES (datetime('now'), ?, ?, ?, ?)",
-              (latest_data["temperature"], latest_data["humidity"], latest_data["light"], latest_data["moisture"]))
-    conn.commit()
-    conn.close()
+        # Handle sensor messages
+        if topic.startswith("sensor/") and "type" in data and "device_id" in data and "value" in data and "time" in data:
+            sensor_type = data["type"]
+            device_id = data["device_id"]
+            value = data["value"]
+            timestamp = data["time"]
+
+            # Update latest_data based on sensor type
+            if sensor_type == "Temperature":
+                latest_data["temperature"] = value
+                print(
+                    f"Received Temperature: {value}°C from {device_id} at {timestamp}")
+            elif sensor_type == "Humidity":
+                latest_data["humidity"] = value
+                print(
+                    f"Received Humidity: {value}% from {device_id} at {timestamp}")
+            elif sensor_type == "Light":
+                latest_data["light"] = value
+                print(
+                    f"Received Light: {value} lux from {device_id} at {timestamp}")
+            elif sensor_type == "Soil_Moisture":
+                latest_data["moisture"] = value
+                print(
+                    f"Received Soil Moisture: {value}% from {device_id} at {timestamp}")
+
+            # Save to SQLite
+            conn = sqlite3.connect("database.db")
+            c = conn.cursor()
+            c.execute("INSERT INTO sensor_data (timestamp, temperature, humidity, light, moisture) VALUES (?, ?, ?, ?, ?)",
+                      (timestamp, latest_data.get("temperature", 0), latest_data.get("humidity", 0), latest_data.get("light", 0), latest_data.get("moisture", 0)))
+            conn.commit()
+            conn.close()
+
+        # Handle device status messages
+        elif topic.startswith("device/") and "type" in data and "device_id" in data and "status" in data and "time" in data:
+            device_type = data["type"]
+            device_id = data["device_id"]
+            status = data["status"]
+            timestamp = data["time"]
+            print(
+                f"Received Device Status: {device_type} {device_id} -> {status} at {timestamp}")
+
+            # Save device status to database
+            conn = sqlite3.connect("database.db")
+            c = conn.cursor()
+            c.execute("INSERT INTO device_status (timestamp, device_type, device_id, status) VALUES (?, ?, ?, ?)",
+                      (timestamp, device_type, device_id, status))
+            conn.commit()
+            conn.close()
+
+    except Exception as e:
+        print(f"Error processing MQTT message: {e}")
 
 
 client.on_connect = on_connect
@@ -238,6 +316,53 @@ def index():
 @app.route("/api/data")
 def get_data():
     return latest_data
+
+
+@app.route("/api/data/history")
+def get_sensor_history():
+    try:
+        # Get query parameters for filtering
+        limit = request.args.get('limit', 100, type=int)
+        hours = request.args.get('hours', 24, type=int)
+
+        conn = sqlite3.connect("database.db")
+        c = conn.cursor()
+
+        # Get sensor data from the last N hours
+        c.execute("""
+            SELECT timestamp, temperature, humidity, light, moisture 
+            FROM sensor_data 
+            WHERE datetime(timestamp) >= datetime('now', '-{} hours')
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        """.format(hours), (limit,))
+
+        rows = c.fetchall()
+        conn.close()
+
+        # Convert to list of dictionaries
+        history = []
+        for row in rows:
+            history.append({
+                'timestamp': row[0],
+                'temperature': row[1],
+                'humidity': row[2],
+                'light': row[3],
+                'moisture': row[4]
+            })
+
+        return jsonify({
+            'status': 'success',
+            'data': history,
+            'count': len(history),
+            'latest': latest_data
+        })
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Error retrieving sensor history: {str(e)}'
+        }), 500
 
 
 @app.route("/api/debug")
@@ -281,11 +406,17 @@ def capture_image():
             with open(image_path, 'wb') as f:
                 f.write(response.content)
 
+            # Rotate the image 180 degrees
+            rotate_success = rotate_image_180(image_path)
+            if not rotate_success:
+                print(f"Warning: Failed to rotate image {image_filename}")
+
             return jsonify({
                 "status": "success",
                 "message": "Image captured and saved successfully",
                 "filename": image_filename,
-                "url": f"/images/{image_filename}"
+                "url": f"/images/{image_filename}",
+                "rotated": rotate_success
             })
         else:
             return jsonify({
@@ -601,6 +732,12 @@ def upload_from_esp32():
         with open(filepath, 'wb') as f:
             f.write(image_data)
 
+        # Rotate the image 180 degrees
+        rotate_success = rotate_image_180(filepath)
+        if not rotate_success:
+            print(
+                f"Warning: Failed to rotate ESP32 auto-uploaded image {filename}")
+
         print(f"ESP32 auto upload saved: {filename} ({len(image_data)} bytes)")
 
         # Lưu vào database
@@ -652,7 +789,12 @@ def capture_esp32_and_analyze():
         with open(image_path, 'wb') as f:
             f.write(response.content)
 
-        print(f"Image saved: {image_filename}")
+        # Rotate the image 180 degrees (only for ESP32 camera images)
+        rotate_success = rotate_image_180(image_path)
+        if not rotate_success:
+            print(f"Warning: Failed to rotate ESP32 image {image_filename}")
+
+        print(f"Image saved and rotated: {image_filename}")
 
         # Process with AI - skip for now since AI API may not be available
         analysis_results = None
@@ -661,7 +803,8 @@ def capture_esp32_and_analyze():
             'status': 'success',
             'image': f'/images/{image_filename}',
             'filename': image_filename,
-            'analysis': analysis_results
+            'analysis': analysis_results,
+            'rotated': rotate_success
         })
 
     except requests.exceptions.Timeout:
@@ -755,10 +898,10 @@ def control_servo():
                 "message": "Angle parameter is required."
             }), 400
 
-        if not isinstance(angle, (int, float)) or not (0 <= angle <= 140):
+        if not isinstance(angle, (int, float)) or not (0 <= angle <= 150):
             return jsonify({
                 "status": "error",
-                "message": "Invalid angle. Must be between 0 and 140 degrees."
+                "message": "Invalid angle. Must be between 0 and 150 degrees."
             }), 400
 
         # Publish MQTT message to control servo
@@ -787,9 +930,51 @@ def get_servo_status():
         "mqtt_enabled": mqtt_enabled,
         "mqtt_connected": mqtt_enabled and client.is_connected(),
         "min_angle": 0,
-        "max_angle": 140,
+        "max_angle": 150,
         "message": "Servo control is available" if mqtt_enabled else "MQTT not available"
     })
+
+
+@app.route('/api/devices/status')
+def get_devices_status():
+    """Get recent device status history"""
+    try:
+        limit = request.args.get('limit', 50, type=int)
+
+        conn = sqlite3.connect("database.db")
+        c = conn.cursor()
+
+        c.execute("""
+            SELECT timestamp, device_type, device_id, status 
+            FROM device_status 
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        """, (limit,))
+
+        rows = c.fetchall()
+        conn.close()
+
+        # Convert to list of dictionaries
+        device_history = []
+        for row in rows:
+            device_history.append({
+                'timestamp': row[0],
+                'device_type': row[1],
+                'device_id': row[2],
+                'status': row[3]
+            })
+
+        return jsonify({
+            'status': 'success',
+            'devices': device_history,
+            'count': len(device_history)
+        })
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Error retrieving device status: {str(e)}'
+        }), 500
 
 
 if __name__ == "__main__":
